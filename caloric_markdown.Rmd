@@ -1,0 +1,321 @@
+---
+title: "Monothermal caloric screening test project"
+author: "Helena"
+date: "16/06/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Calculating and classifying full test results
+
+Vicki has provided us with the following dataset, with peak slow-phase velocity (SPV, degrees/s) measurements for the full caloric test for 800 patients. (Order = whether warm or cold was performed first, WR = warm right, WL = warm left, CR = cold right, CL = cold left)
+
+```{r, message= FALSE}
+library (tidyverse) #Load the tidyverse
+
+data <- read_csv("caloric_tidy.csv")
+```
+
+From these SPV values, values for Canal Paresis (CP) and Directional Preponderance (DP) were calculated as follows:
+
+```{r}
+data <- mutate(data, 
+       CP = ((WR + CR)-(WL + CL))/(WR + WL + CR + CL)*100,
+       DP = ((WR + CL) - (WL + CR))/(WR + WL + CR + CL)*100)
+```
+
+A patient has a significant finding (pos) if their CP or DP score is >20 or < -20, or all 4 measurements (WR, WL, CR, CL) are < 8. A high CP or DP score indicates an imbalance between the ears. Low values for all measurements indicates both ears are hypofunctional. The column gold_call indicates whether there is any significant finding.
+
+```{r}
+data <- mutate(data, 
+                CP_call = if_else(((CP > -20) & (CP < 20)), "Neg", "Pos"),
+                DP_call = if_else(((DP > -20) & (DP < 20)), "Neg", "Pos"),
+                Hypo_call  = if_else(((WR < 8) & (WL < 8) & (CR < 8) & (CL <8)), "Hypo", "Normal"),
+                gold_call = if_else(((CP_call == "Pos") | (DP_call == "Pos") | (Hypo_call == "Hypo")), 
+                                    "Pos", "Neg"))
+
+```
+ 
+ 
+## Using the monothermal test as a screen
+The monothermal screening test works as follows:
+The full test is performed either warms first or cools first. After performing the first temperature, a monothermal test score can be calculated, and if this score is within an acceptable range the patient will not have to undergo the full test. The purpose of the following analysis is to determine whether monothermal screen results are a good predictor of full test outcome, whether the temperature of the monothermal screen affects the prediction and determining the best cutoff for the monothermal screen.
+
+The code below calculates a monothermal result depending on the order the tests were conducted. Then checks if the monothermal measurements indicate bilateral hypofunction and converts these test scores to NA (as these findings will be significant irrespective of score).
+
+```{r}
+#Calculates monothermal screen score depending on order
+data <- mutate(data,
+               MS = if_else(Order == "W", (WR - WL)/(WR + WL)*100, (CR - CL)/(CR + CL)*100))
+
+#Convert to non-negative number
+data <- mutate(data,
+               MS = if_else(MS <0, MS*-1, MS))
+
+#Identifies patients where the monothermal screen has indicated bilateral hypofunction
+data <- mutate(data,
+                HS = if_else(((Order == "W") & (WR < 8) & (WL <8)), "Hypo",
+                        if_else(((Order =="C") & (CR < 8) & (CL <8)), "Hypo", "Normal")))
+
+#If HS == "Hypo" MS needs to be converted to NA (finding will be significant irrespective of score)
+data <- mutate(data,
+               MS = ifelse((HS == "Hypo"), NA, MS))
+
+```
+
+## Logistic regression model
+Logistic regression can be used to model the relationship between MS (monothermal screen score), Order (cold or warm monothermal test) and gold_call (full caloric test outcome).
+
+### Data preparation
+First I have prepared the data by converting categorical variables to factors and removing the rows with NA values (these are the patients who will be classed as significant whatever their screen score, as their measurements indicate bilateral hypofunction - see above).
+
+```{r}
+#Convert gold_call and Order to factors
+data$gold_call <- as.factor(data$gold_call)
+data$Order <- as.factor(data$Order)
+
+#Remove rows with NAs from data - (34 rows)
+data <- data[!(is.na(data$MS)),]
+```
+
+### Model assumptions
+Next I can check that the data are not imbalanced between warm and cold tests (there are patients in each of the 4 cells of the xtable). 
+
+```{r}
+xtabs(~ gold_call + Order, data = data)
+```
+
+Next I checked whether there is a linear relationship between MS and log(odds gold_call = positive). To do this, I split the data into 4 bins based on the quartiles. I calculated the proportion of patients that were positive in each bin, then converted this to the log(odds) of being positive in each bin. I calculated the median MS in each bin and plotted MS (x-axis) vs log(odds) of being positive (y axis). This should be approximately linear, which it is. If it was not, it would require transformation or categorisation to in order for the model to work.
+
+```{r}
+#Split MS into quartiles
+q <- quantile(data$MS, probs=seq(0,1,0.25))
+
+#Find numbers of pos and neg in each quartile, calculate proportion (probability) positive
+table1 <- table(data$gold_call[data$MS< q[2]])
+p1 <- table1[[2]]/(table1[[1]]+table1[[2]])
+
+table2 <- table(data$gold_call[data$MS >=q[2] & data$MS < q[3]])
+p2 <- table2[[2]]/(table2[[1]]+table2[[2]])
+
+table3 <- table(data$gold_call[data$MS >= q[3] & data$MS < q[4]])
+p3 <- table3[[2]]/(table3[[1]]+table3[[2]])
+
+table4 <- table(data$gold_call[data$MS >= q[4] ])
+p4 <- table4[[2]]/(table4[[1]]+table4[[2]])
+
+#Store all of these in 1 object called probs
+probs <- c(p1, p2, p3, p4)
+#Turn the probabilities into log odds
+logits <- log(probs/(1-probs))
+
+#Caluclate median MS in each group
+
+meds <- c( median(data$MS[ data$MS < q[2] ]),
+           median(data$MS[ data$MS >=q[2] & data$MS < q[3] ]),
+           median(data$MS[ data$MS >=q[3] & data$MS < q[4] ]),
+           median(data$MS[ data$MS >= q[4] ]))
+
+#Plot it
+plot(meds, logits, xlab = "MS", ylab = "log-odds(pos|MS)", las = 1)
+```
+
+### Model
+Now that the assumptions have been checked a logistic regression model can be built. I have included the interaction between MS and Order in the model.
+
+```{r}
+
+#Logistic regression using MS, Order and gold_call
+logistic <- glm(gold_call ~ MS * Order, data = data, family = "binomial")
+summary(logistic)
+```
+
+The deviance residuals should be close to being centred on 0 and roughly symmetrical. 3Q is actually closer to 0 - I am not yet sure what this means.
+
+The small P value for the MS coefficient shows this variable has a statistically significant relationship with gold_call (Wald test). The value of 0.15729 represent is the increase in log(odds) of being positive when MS is increased by 1. The value of the intercept is the log(odds) of being positive when MS and Order = 0 (cold in the case of Order). 
+
+OrderW = 1 when Order = W and 0 when Order = C. The Order coefficient is the decrease in log odds when the temperature is changed from C(0) to W(1) and the MS value is constant. The large P value for Order shows this variable is significantly different from 0 and therefore has significant effect on the probability of being positive.
+
+Order and MS have a significant interaction. This means the effect of either MS or Order on the probability of being positive varies depending on the level of the other. The coefficient means when Order = 1 (W) the increase in log(odds positive) is 0.15729+0.06692 when MS is increased by 1.
+
+The following code plots the function for each temperature. The different slopes of the mid-section of the s-curve demonstrate the interaction described above. 
+
+```{r}
+#Create a list of evenly spaced values between 0 and 170
+x_MS <- seq(0, 170, 1)
+
+#Save coefficients from the model
+b0 <- logistic$coefficients[1]
+MS <- logistic$coefficients[2]
+OrderW <- logistic$coefficients[3]
+Inter <- logistic$coefficients[4]
+
+#Equations for group C
+c_logits <- b0 + MS*x_MS
+c_probs <- exp(c_logits)/(1 + exp(c_logits))
+
+#Equations for group W
+w_logits <- b0 + MS*x_MS + OrderW*1 + Inter*x_MS*1
+w_probs <- exp(w_logits)/(1 + exp(w_logits))
+
+#Plot it
+plot(x_MS, c_probs, 
+     ylim=c(0,1),
+     type="l", 
+     lwd=3, 
+     lty=2, 
+     col="turquoise2",
+     xlab="MS", ylab="P(outcome)", main="Logistic functions for warm and cold groups")
+
+
+# Add the line for people who are in the b group
+lines(x_MS, w_probs, 
+      type="l", 
+      lwd=3, 
+      lty=2, 
+      col="orangered")
+
+```
+
+### Model discrimination
+ROC analysis shows how good the model is at discrimination, the area under the curve (AUC) shows what percentage of the data is correctly ranked. (If the model computes a probability for each patient and the patients are ranked according to probability, and discrimination is perfect, all the negatives should come first). Note: This doesn't tell you anything about how close to actual probabilities the predicted probabilities are, that is calibration.
+
+```{r}
+library(ROCit)
+
+data$prediction <- logistic$fitted.values
+
+logroc_results <- rocit(score = data$prediction, class = data$gold_call, negref = "Neg")
+
+plot(logroc_results, values = F, YI = F, legend = F)
+
+summary(logroc_results)
+ciAUC(logroc_results)
+```
+
+An AUC of 0.928 demonstrates the model has excellent discrimination.
+
+### Determining an optimum cutoff for use in the clinic
+In this clinical context the 'cost' of a false negative is high, as this patient will have a missed diagnosis and may not receive the correct intervention as a result. Conversely, the 'cost' of a false positive is relatively low, as these patients will not ultimately receive the wrong diagnosis, they will just have to undergo more tests. For this reason a test with high sensitivity (95%), but low specificity (>50%) is deemed acceptable.
+
+The ROC analysis allows an examination of sensitivity and specificity, given a certain cutoff (predicted probability from the model). If the prevalence of positives in the population is known, the negative predictive value (NPV) and positive predictive value (PPV) and the proprtion of patients undergoing the full test can also be calculated. This is useful for test interpretation and service planning.
+
+The prevalence of 'Positive' patients in the study was calculated as follows:
+ 
+```{r}
+gold_sum <- summary(as.factor(data$gold_call))
+
+gold_sig <- gold_sum[names(gold_sum) == "Pos"]
+gold_insig <- gold_sum[names(gold_sum) == "Neg"]
+prevalence <- (gold_sig/(gold_sig + gold_insig))*100
+
+cat("Prevalence of significant findings in study is ", prevalence, "%")
+
+```
+
+```{r}
+
+Positives <- prevalence
+Negatives <- 100-prevalence
+
+data2 <- tibble(Cutoff=logroc_results$Cutoff, 
+                      Sensitivity=logroc_results$TPR, 
+                      Specificity=1-logroc_results$FPR,
+                FN=Positives - (Positives*Sensitivity),
+                FP=Negatives - (Negatives*Specificity),
+                TN=Negatives*Specificity,
+                TP=Positives*Sensitivity,
+                NPV=TN/(TN + FN),
+                PPV=TP/(FP + TP),
+                FT= TP + FP)
+
+#Find rows with sensitivity closest to 0.9, 0.95, 0.98 and 0.99 and display in a table
+list90 <- which(abs(data2$Sensitivity - 0.9)==min(abs(data2$Sensitivity - 0.9)))
+row90 <- round(sum(list90)/length(list90))
+
+list95 <- which(abs(data2$Sensitivity - 0.95)==min(abs(data2$Sensitivity - 0.95)))
+row95 <- round(sum(list95)/length(list95))
+
+list98 <- which(abs(data2$Sensitivity - 0.98)==min(abs(data2$Sensitivity - 0.98)))
+row98 <- round(sum(list98)/length(list98))
+
+list99 <- which(abs(data2$Sensitivity - 0.99)==min(abs(data2$Sensitivity - 0.99)))
+row99 <- round(sum(list99)/length(list99))
+
+data3 <- slice(data2, row90, row95, row98, row99)
+
+library(knitr)
+
+kable(data3, digits = 2)
+
+```
+
+The table shows that a cutoff of 0.08 will result in a sensitivity of 95% and specificity of 57%, and this will save over a third of patients from having to undergo the full test, at the expense of around 2 false negatives per 100 patients seen.
+
+In practice, this means the clinician doing the test, takes the two first SPV measurements. They then input the MS score, whether the test was warm or cold into the model and get a probability. If there is > 0.08 probability of being positive they go on to conduct the full test.
+
+### Model calibration
+It is important to check calibrate the model if we are using the probabilities it generates, as we are in this example.
+
+```{r}
+#Find numbers of pos and neg in each bin - would be more efficient with a loop
+table1 <- table(data$gold_call[data$prediction< 0.1])
+p1 <- table1[[2]]/(table1[[1]]+table1[[2]])
+
+table2 <- table(data$gold_call[data$prediction >= 0.1 & data$prediction < 0.2])
+p2 <- table2[[2]]/(table2[[1]]+table2[[2]])
+
+table3 <- table(data$gold_call[data$prediction >= 0.2 & data$prediction < 0.3])
+p3 <- table3[[2]]/(table3[[1]]+table3[[2]])
+
+table4 <- table(data$gold_call[data$prediction >= 0.3 & data$prediction < 0.4])
+p4 <- table4[[2]]/(table4[[1]]+table4[[2]])
+
+table5 <- table(data$gold_call[data$prediction >= 0.4 & data$prediction < 0.5])
+p5 <- table5[[2]]/(table5[[1]]+table5[[2]])
+
+table6 <- table(data$gold_call[data$prediction >= 0.5 & data$prediction < 0.6])
+p6 <- table6[[2]]/(table6[[1]]+table6[[2]])
+
+table7 <- table(data$gold_call[data$prediction >= 0.6 & data$prediction < 0.7])
+p7 <- table7[[2]]/(table7[[1]]+table7[[2]])
+
+table8 <- table(data$gold_call[data$prediction >= 0.7 & data$prediction < 0.8])
+p8 <- table8[[2]]/(table8[[1]]+table8[[2]])
+
+table9 <- table(data$gold_call[data$prediction >= 0.8 & data$prediction < 0.9])
+p9 <- table9[[2]]/(table9[[1]]+table9[[2]])
+
+table10 <- table(data$gold_call[data$prediction >= 0.9 ])
+p10 <- table10[[2]]/(table10[[1]]+table10[[2]])
+
+#Store all of these in 1 object called probs
+cal_probs <- c(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10)
+
+#Have the x values midway through each bin
+cal_x <- seq(0.05, 0.95, 0.1)
+
+#Plot it
+plot(cal_x, cal_probs, xlab = "Model predictions", ylab = "Fraction of positives", las = 1)
+
+
+lines(cal_x, cal_x, 
+      type="l", 
+      lwd=3, 
+      lty=3, 
+      col="grey")
+
+lines(cal_x, cal_probs, 
+      type="l", 
+      lwd=2, 
+      lty=1, 
+      col="blue")
+
+```
+
+Perfect calibration is shown in grey. This plot shows the model is relatively well calibrated, but the model is overestimating the fraction of positives at low probabilities.

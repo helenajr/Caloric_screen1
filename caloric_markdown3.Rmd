@@ -1,0 +1,426 @@
+---
+title: "Spline transformations"
+author: "Helena"
+date: "29/06/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro to part 3
+I previously used lrm to fit a model without any transformations of the underlying data. Now I have used the rcs function to add a transformation - how do I tell if this is better? Differences are from the model onwards.
+
+## Calculating and classifying full test results
+
+Vicki has provided us with the following dataset, with peak slow-phase velocity (SPV, degrees/s) measurements for the full caloric test for 800 patients. (Order = whether warm or cold was performed first, WR = warm right, WL = warm left, CR = cold right, CL = cold left)
+
+```{r, message= FALSE}
+library (tidyverse) #Load the tidyverse
+
+data <- read_csv("caloric_tidy.csv")
+```
+
+From these SPV values, values for Canal Paresis (CP) and Directional Preponderance (DP) were calculated as follows:
+
+```{r}
+data <- mutate(data, 
+       CP = ((WR + CR)-(WL + CL))/(WR + WL + CR + CL),
+       DP = ((WR + CL) - (WL + CR))/(WR + WL + CR + CL))
+```
+
+A patient has a significant finding (pos) if their CP or DP score is >20 or < -20, or all 4 measurements (WR, WL, CR, CL) are < 8. A high CP or DP score indicates an imbalance between the ears. Low values for all measurements indicates both ears are hypofunctional. The column gold_call indicates whether there is any significant finding.
+
+```{r}
+data <- mutate(data, 
+                CP_call = if_else(((CP > -0.20) & (CP < 0.20)), "Neg", "Pos"),
+                DP_call = if_else(((DP > -0.20) & (DP < 0.20)), "Neg", "Pos"),
+                Hypo_call  = if_else(((WR < 8) & (WL < 8) & (CR < 8) & (CL <8)), "Hypo", "Normal"),
+                gold_call = if_else(((CP_call == "Pos") | (DP_call == "Pos") | (Hypo_call == "Hypo")), 
+                                    "Pos", "Neg"))
+
+```
+ 
+ 
+## Using the monothermal test as a screen
+The monothermal screening test works as follows:
+The full test is performed either warms first or cools first. After performing the first temperature, a monothermal test score can be calculated, and if this score is within an acceptable range the patient will not have to undergo the full test. The purpose of the following analysis is to determine whether monothermal screen results are a good predictor of full test outcome, whether the temperature of the monothermal screen affects the prediction and determining the best cutoff for the monothermal screen.
+
+The code below calculates a monothermal result depending on the order the tests were conducted. Then checks if the monothermal measurements indicate bilateral hypofunction and converts these test scores to NA (as these findings will be significant irrespective of score).
+
+```{r}
+#Calculates monothermal screen score depending on order
+data <- mutate(data,
+               MS = if_else(Order == "W", (WR - WL)/(WR + WL), (CR - CL)/(CR + CL)))
+
+#Convert to non-negative number
+data <- mutate(data,
+               MS = if_else(MS <0, MS*-1, MS))
+
+#Identifies patients where the monothermal screen has indicated bilateral hypofunction
+data <- mutate(data,
+                HS = if_else(((Order == "W") & (WR < 8) & (WL <8)), "Hypo",
+                        if_else(((Order =="C") & (CR < 8) & (CL <8)), "Hypo", "Normal")))
+
+#If HS == "Hypo" MS needs to be converted to NA (finding will be significant irrespective of score)
+data <- mutate(data,
+               MS = ifelse((HS == "Hypo"), NA, MS))
+
+```
+
+## Logistic regression model
+Logistic regression can be used to model the relationship between MS (monothermal screen score), Order (cold or warm monothermal test) and gold_call (full caloric test outcome).
+
+### Data preparation
+First I have prepared the data by converting categorical variables to factors and removing the rows with NA values (these are the patients who will be classed as significant whatever their screen score, as their measurements indicate bilateral hypofunction - see above).
+
+```{r}
+#Convert gold_call and Order to factors
+data$gold_call <- as.factor(data$gold_call)
+data$Order <- as.factor(data$Order)
+
+#Remove rows with NAs from data - (34 rows)
+data <- data[!(is.na(data$MS)),]
+```
+
+### Model assumptions
+
+Next I can check that the data are not imbalanced between warm and cold tests (there are patients in each of the 4 cells of the xtable). 
+
+```{r}
+xtabs(~ gold_call + Order, data = data)
+```
+
+Next I checked whether there is a linear relationship between MS and log(odds gold_call = positive). To do this, I split the data into 10 bins based on 10 quantiles. I calculated the proportion of patients that were positive in each bin, then converted this to the log(odds) of being positive in each bin. I calculated the mean MS in each bin (mean is better than median here as if the data is skewed, we want to see it) and plotted MS (x-axis) vs log(odds) of being positive (y axis). This should be approximately linear. It looks like it deviates from linearity by some amount, so may require some transformation to correct for this. It looks like this deviation could be captured by adding a single knot (two different gradients).
+
+```{r}
+#Split MS into quartiles
+q <- quantile(data$MS, probs=seq(0,1,0.1))
+
+#Find numbers of pos and neg in each quartile, calculate proportion (probability) positive
+table1 <- table(data$gold_call[data$MS< q[2]])
+p1 <- table1[[2]]/(table1[[1]]+table1[[2]])
+
+table2 <- table(data$gold_call[data$MS >=q[2] & data$MS < q[3]])
+p2 <- table2[[2]]/(table2[[1]]+table2[[2]])
+
+table3 <- table(data$gold_call[data$MS >= q[3] & data$MS < q[4]])
+p3 <- table3[[2]]/(table3[[1]]+table3[[2]])
+
+table4 <- table(data$gold_call[data$MS >= q[4] & data$MS < q[5] ])
+p4 <- table4[[2]]/(table4[[1]]+table4[[2]])
+
+table5 <- table(data$gold_call[data$MS >=q[5] & data$MS < q[6]])
+p5 <- table5[[2]]/(table5[[1]]+table5[[2]])
+
+table6 <- table(data$gold_call[data$MS >= q[6] & data$MS < q[7]])
+p6 <- table6[[2]]/(table6[[1]]+table6[[2]])
+
+table7 <- table(data$gold_call[data$MS >= q[7] & data$MS < q[8]])
+p7 <- table7[[2]]/(table7[[1]]+table7[[2]])
+
+table8 <- table(data$gold_call[data$MS >= q[8] & data$MS < q[9]])
+p8 <- table8[[2]]/(table8[[1]]+table8[[2]])
+
+table9 <- table(data$gold_call[data$MS >= q[9] & data$MS < q[10]])
+p9 <- table9[[2]]/(table9[[1]]+table9[[2]])
+
+table10 <- table(data$gold_call[data$MS >= q[10] ])
+p10 <- table10[[2]]/(table10[[1]]+table10[[2]])
+
+#Store all of these in 1 object called probs - note p10 is 1, so is replaced by an arb value close to 1
+probs <- c(p1, p2, p3, p4, p5, p6, p7, p8, p9, 0.9999999999)
+#Turn the probabilities into log odds
+logits <- log(probs/(1-probs))
+
+#Caluclate mean MS in each group
+
+means <- c( mean(data$MS[ data$MS < q[2] ]),
+           mean(data$MS[ data$MS >=q[2] & data$MS < q[3] ]),
+           mean(data$MS[ data$MS >=q[3] & data$MS < q[4] ]),
+           mean(data$MS[ data$MS >= q[4] & data$MS < q[5] ]),
+           mean(data$MS[ data$MS >= q[5] & data$MS < q[6] ]),
+           mean(data$MS[ data$MS >= q[6] & data$MS < q[7] ]),
+           mean(data$MS[ data$MS >= q[7] & data$MS < q[8] ]),
+           mean(data$MS[ data$MS >= q[8] & data$MS < q[9] ]),
+           mean(data$MS[ data$MS >= q[9] & data$MS < q[10] ]),
+           mean(data$MS[ data$MS >= q[10]  ]))
+
+#Plot it
+plot(means, logits, xlab = "MS", ylab = "log-odds(pos|MS)", ylim = c(-5, 30))
+```
+
+It is pretty obvious from this plot that there is a strong relationship between log(odds outcome) and MS, however this can also be tested using the spearman2() function. This returns the rho2 statistic which gives a value between 0 and 1, the higher the value, the stronger the relationship. This is analogous to the Pearson correlation coefficient, but it can also test non linear and odd shaped relationships (like a parabola for example). The rho2 for MS is high, indicating a strong relationship (over ~0.15 is considered relatively high). A strong relationship allows more degrees of freedom to be spent fitting the model (i.e more splines, which means more coefficients).
+
+```{r, message = FALSE}
+# Test the strength of the relationship between log-odds(pos|MS) and MS
+library(rms)
+spearman2(gold_call ~ MS + Order, data = data, p = 2)
+```
+
+Another general rule of numbers of coefficients look at the number of results in each class (Neg 511, Pos 255) and you need an order of magnitude different between number in the smallest class and maximum number of coefficients you can have.
+
+### Model
+
+```{r, message= FALSE}
+
+## Prep my data so it looks like Harrell's example (p226), switch gold_call to numerical type.
+data <- mutate(data,
+               gc_binary = if_else(gold_call == 'Pos', 1, 0))
+rms_data <- select(data, Order, MS, gc_binary)
+
+# Define the data and use the datadist function
+d <- rms_data
+dd <- datadist(d); 
+options(datadist= 'dd')
+dd
+```
+
+The first step defines the data distribution. I don't understand all the output of this function. It has a column for each of the vectors in my dataset. Starting from the bottom, Values shows the possible values for my categorical variables. 'High' is the highest value in each vector. 'Low' is the lowest value. I don't understand any other of the rows.
+
+Next we run the model:
+```{r}
+f <- lrm(gc_binary ~ rcs(MS, 3) * Order, data=d) #Now with splines - is this 4 knots?!!
+fasr <- f # Save for later - I don't know why!
+f
+anova(f)
+AIC(f)
+```
+
+This produces a model with a load of new coefficients - for each different line gradient. The p values for the coefficients don't then mean very much anymore. ANOVA will give p values relevant to the whole model. This shows a very low p value for the model overall.
+
+'C', which is AUC (discrimination ability) has improved though over the previous model! And the Akaike Information Criteria (AIC) is lower than the model without the transformation.
+
+Next I can plot the model:
+```{r}
+qs <- quantile(rms_data$MS, probs=seq(0,1,(1/3)))
+w <- function(...)
+   with(d, {
+      wa <- Order=='W'
+      co <- Order=='C'
+      lpoints(MS[wa], gc_binary[wa], pch=1) 
+      lpoints(MS[co], gc_binary[co], pch=2)
+      af <- cut2(MS, c(qs[2],qs[3]), levels.mean=TRUE) 
+      prop <- tapply(gc_binary, list(af, Order), mean, na.rm=TRUE)
+      agem <- as.numeric(row.names(prop))
+      lpoints(agem, prop[,'W'], pch=4, cex=1.3, col='green')
+      lpoints(agem, prop[,'C'],
+              pch=5, cex=1.3, col='green')
+      x <-rep(0.62, 4); y <- seq(.25, .1, length=4) 
+      lpoints(x, y, pch=c(1, 2, 4, 5),
+              col=rep(c('blue','green'),each=2)) # This relates to the legend
+      ltext(x+0.2, y,
+            c('W Observed ','C Observed ', 
+              'W Proportion ','C Proportion '), cex=0.8) #This relates to the legend - why doesn't it work??
+   } ) # Figure 10.3
+plot(Predict(f, MS=seq(0, 1.7, length=200), Order, fun=plogis), ylab= 'Pr[response] ', 
+     ylim=c(-.02, 1.02), addpanel=w)
+```
+
+Whta is going on with the confidence intervals?? Is this because there are few points at high MS values??
+
+The blue points are the observed data, the S-curves are the logistic function for each temperature and the green points are the observed proportions for MS values (<0.085, 0.0.85-0.2 and >0.2), plotted at the mean MS for each of these groups. The groups are based on the tertiles of the data, I don't know whether Harrell's groupings were based on this or are arbitrary. The observed proportion for the highest third of values does not fall with the grey (95% 'pointwise' confidence intervals), is this a clue to the non-linearity of MS/ log-odds?
+
+The interaction between Order and MS can be seen more clearly on a log odds scale. The following two plots show the model on a log odds scale and predicted probabilities for each point in the dataset.
+
+```{r}
+#Create a list of evenly spaced values between 0 and 170
+x_MS <- seq(0, 1.7, 0.01)
+
+#Obtain predictions for our sequence for both warm and cool
+cw_logits <- Predict(f, MS = x_MS, Order)
+
+#Convert log(odds) in cw_logits to probabilities - this is for later
+cw_logits$Probs <- exp(cw_logits$yhat)/(1 + exp(cw_logits$yhat))
+
+#Values for cool
+c_logits <- filter(cw_logits, Order == "C")
+
+#Values for warm
+w_logits <- filter(cw_logits, Order == "W")
+
+#Plot it
+plot(x_MS, c_logits$yhat, 
+     type="l", 
+     lwd=3, 
+     lty=2, 
+     col="turquoise2",
+     xlab="MS", ylab="log ( odds outcome)", main="Interaction for warm and cold groups")
+
+# Add the line for people who are in the b group
+lines(x_MS, w_logits$yhat, 
+      type="l", 
+      lwd=3, 
+      lty=2, 
+      col="orangered")
+
+#Get the model to give predictions from each data point
+data$prediction <- predict(f)
+
+### Plot the model predictions for the dataset
+
+plot(data$MS, data$prediction, col = data$Order)
+
+legend("bottomright", legend = c("Warm = red", "Cool = black"))
+```
+
+
+### Validation and Calibration 
+
+Validation and calibration rely on resampling the data. A bootstrap sample will always include the same number of data points as the original, but will include some of the points twice (resampling with replacement). About a third of the original data points will not appear in the new sample.
+
+In the validation output index.orginal is the original values when the model is fitted to the original dataset. Training is the average value from fitting of the 1000 bootstrap samples. Test is the average value when the training models are applied to the excluded data points. Optimism is training - test. Index corrected is the index.original - optimism. Simples.
+
+In the calibration line, the bias-corrected line is the values after optimism correction. In this case apparent and bias corrected lines are almost on top of each other showing, not much optimism correction was required.
+
+```{r}
+f <- update(f, x=TRUE, y=TRUE)
+set.seed(42) #Set randomisation to start in the same place for both validation and calibration
+val <- validate(f, B = 1000) #Min of 1000 bootstrap samples normally
+val
+
+set.seed(42)
+cal <- calibrate(f, B = 1000)
+plot(cal)
+```
+
+### Plotting a ROC Curve
+
+The lrm model output has already calculated the AUC ('C'). I want to plot the ROC curve, but not sure how to get fitted values out of the lrm() model.
+
+```{r}
+library(ROCit)
+
+data$prediction <- predict(f, type = "fitted")
+
+#data$prediction <- logistic$fitted.values #What is the rms equivalent of this?
+
+logroc_results <- rocit(score = data$prediction, class = data$gold_call, negref = "Neg")
+
+plot(logroc_results, values = F, YI = F, legend = F)
+
+summary(logroc_results)
+ciAUC(logroc_results, nboot = 200)
+```
+
+This next section uses the results of the ROC analysis.
+
+### Determining an optimum cutoff for use in the clinic
+In this clinical context the 'cost' of a false negative is high, as this patient will have a missed diagnosis and may not receive the correct intervention as a result. Conversely, the 'cost' of a false positive is relatively low, as these patients will not ultimately receive the wrong diagnosis, they will just have to undergo more tests. For this reason a test with high sensitivity (95%), but low specificity (>50%) is deemed acceptable.
+
+The ROC analysis allows an examination of sensitivity and specificity, given a certain cutoff (predicted probability from the model). If the prevalence of positives in the population is known, the negative predictive value (NPV) and positive predictive value (PPV) and the proprtion of patients undergoing the full test can also be calculated. This is useful for test interpretation and service planning.
+
+The prevalence of 'Positive' patients in the study was calculated as follows:
+ 
+```{r}
+gold_sum <- summary(as.factor(data$gold_call))
+
+gold_sig <- gold_sum[names(gold_sum) == "Pos"]
+gold_insig <- gold_sum[names(gold_sum) == "Neg"]
+prevalence <- (gold_sig/(gold_sig + gold_insig))*100
+
+cat("Prevalence of significant findings in study is ", prevalence, "%")
+
+```
+
+```{r}
+
+Positives <- prevalence
+Negatives <- 100-prevalence
+
+data2 <- tibble(Cutoff=logroc_results$Cutoff, 
+                      Sensitivity=logroc_results$TPR, 
+                      Specificity=1-logroc_results$FPR,
+                FN=Positives - (Positives*Sensitivity),
+                FP=Negatives - (Negatives*Specificity),
+                TN=Negatives*Specificity,
+                TP=Positives*Sensitivity,
+                NPV=TN/(TN + FN),
+                PPV=TP/(FP + TP),
+                FT= TP + FP)
+
+#Find rows with sensitivity closest to 0.9, 0.95, 0.98 and 0.99 and display in a table
+list90 <- which(abs(data2$Sensitivity - 0.9)==min(abs(data2$Sensitivity - 0.9)))
+row90 <- round(sum(list90)/length(list90))
+
+list95 <- which(abs(data2$Sensitivity - 0.95)==min(abs(data2$Sensitivity - 0.95)))
+row95 <- round(sum(list95)/length(list95))
+
+list98 <- which(abs(data2$Sensitivity - 0.98)==min(abs(data2$Sensitivity - 0.98)))
+row98 <- round(sum(list98)/length(list98))
+
+list99 <- which(abs(data2$Sensitivity - 0.99)==min(abs(data2$Sensitivity - 0.99)))
+row99 <- round(sum(list99)/length(list99))
+
+data3 <- slice(data2, row90, row95, row98, row99)
+
+library(knitr)
+
+kable(data3, digits = 2)
+
+#What cutoffs does this equate to for warm and cold tests
+# Find the cutoff prbability relating to 95%
+cut_pr <- data2$Cutoff[row95]
+
+
+#Find the probability closest to cut_pr for cools
+list_cp <- which(abs(c_logits$Probs - cut_pr)==min(abs(c_logits$Probs - cut_pr)))
+row_cp <- round(sum(list_cp)/length(list_cp))
+
+cut_cool <- c_logits$MS[row_cp]
+
+cat("Cutoff required for 95% specificity for cool test ", cut_cool)
+
+#Find the probability closest to cut_pr for warms
+list_wp <- which(abs(w_logits$Probs - cut_pr)==min(abs(w_logits$Probs - cut_pr)))
+row_wp <- round(sum(list_wp)/length(list_wp))
+
+cut_warm <- w_logits$MS[row_wp]
+
+cat("Cutoff required for 95% specificity for warm test ", cut_warm)
+```
+
+The table shows that a cutoff of 0.08 will result in a sensitivity of 95% and specificity of 57%, and this will save over a third of patients from having to undergo the full test, at the expense of around 2 false negatives per 100 patients seen.
+
+In practice, this means the clinician doing the test, takes the two first SPV measurements. They then input the MS score, whether the test was warm or cold into the model and get a probability. If there is > 0.08 probability of being positive they go on to conduct the full test. This corresponds to an MS cutoff of 0.07 for a cold test and 0.14 for the warm test.
+
+### Looking at hot and cold tests separately
+
+Creating a regression model as we did above does not provide an assessment of which temperature is better, but drawing each ROC curve separately can provide an idea. This shows the AUC is greater for the warm test than the cool test, so in general provides a better sensitivity/ specificity trade off. There is no statistical test which can determine if ROC curves are significantly different from one another.
+
+The confidence intervals here are most likely wrong, but invocation of the function is correct - see Antonios email. Better to use pROC package in future.
+
+```{r, message= FALSE, warning = FALSE}
+data_warm <- filter(data, Order == 'W')
+data_cool <- filter(data, Order == 'C')
+
+wlogroc_results <- rocit(score = data_warm$prediction, class = data_warm$gold_call, negref = "Neg")
+clogroc_results <- rocit(score = data_cool$prediction, class = data_cool$gold_call, negref = "Neg")
+
+
+ci_warm <- ciROC(wlogroc_results, level = 0.95)
+ci_cold <- ciROC(clogroc_results, level = 0.95)
+
+plot(ci_warm, legend = F, col = 2)
+lines(ci_cold$TPR~ci_cold$FPR, col = "blue", lwd = 1.5)
+lines(ci_cold$LowerTPR~ci_cold$FPR, col = "blue", lty = 2)
+lines(ci_cold$UpperTPR~ci_cold$FPR, col = "blue", lty = 2)
+legend("bottomright", c("Warm test",
+                        "Warm test 95% CI",
+                        "Cool test",
+                        "Cool test 95% CI"),
+       lty = c(1,2,1,2), col = c(2, 2, "blue", "blue"))
+
+
+```
+
+
+```{r}
+set.seed(42)
+ciAUC(wlogroc_results, nboot = 1000) # Warm tests
+
+set.seed(42)
+ciAUC(clogroc_results, nboot = 1000) # Cool tests
+```
+
